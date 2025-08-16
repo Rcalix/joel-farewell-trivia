@@ -8,12 +8,8 @@ import ResultsScreen from './components/ResultsScreen';
 import FinalScreen from './components/FinalScreen';
 
 // Configuración del socket para NestJS
-const SERVER_URL = process.env.NODE_ENV === 'production' 
-  ? 'https://your-server-url.com' 
-  : 'http://localhost:3001';
-
+const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
 const socket = io(SERVER_URL);
-
 const JoelTriviaApp = () => {
   // Estados del juego
   const [gameState, setGameState] = useState({
