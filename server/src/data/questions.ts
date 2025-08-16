@@ -21,7 +21,7 @@ export const triviaQuestions: TriviaQuestion[] = [
       { letter: "A", text: "Dice Psycho Pass pero en secreto ve waifus slice of life", icon: "👁️", color: "bg-rose-100" },
       { letter: "B", text: "Attack on Titan pero solo para parecer intelectual", icon: "⚔️", color: "bg-blue-100" },
       { letter: "C", text: "Death Note mientras planea conquistar el mundo con ajedrez", icon: "📔", color: "bg-purple-100" },
-      { letter: "D", text: "One Piece porque nunca termina como sus proyectos musicales", icon: "🏴‍☠️", color: "bg-orange-100" }
+      { letter: "D", text: "GTO Onizuka", icon: "🏴‍☠️", color: "bg-orange-100" }
     ]
   },
   {

@@ -9,7 +9,11 @@ import FinalScreen from './components/FinalScreen';
 
 // Configuración del socket para NestJS
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
-const socket = io(SERVER_URL);
+const socket = io(SERVER_URL, {
+  transports: ['websocket', 'polling'],
+});
+
+console.log('🔗 Conectando a servidor:', SERVER_URL);
 const JoelTriviaApp = () => {
   // Estados del juego
   const [gameState, setGameState] = useState({
