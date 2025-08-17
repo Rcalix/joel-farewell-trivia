@@ -31,6 +31,8 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(GameGateway.name);
   private questionTimer: NodeJS.Timeout | null = null;
 
+  constructor(private readonly gameService: GameService) {}
+
   private stopQuestionTimer() {
     if (this.questionTimer) {
       clearInterval(this.questionTimer);
@@ -38,37 +40,97 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
+  // NUEVO: Método centralizado para manejar cuando se completa una pregunta
+  private handleQuestionComplete() {
+    this.stopQuestionTimer();
+    
+    // Obtener resultados y estado
+    const results = this.gameService.getQuestionResults();
+    const gameState = this.gameService.getGameState();
+    
+    this.logger.log(`📊 Pregunta completada - enviando resultados. Fase: ${gameState.phase}`);
+    
+    // Emitir resultados con información adicional
+    this.server.emit('questionResults', {
+      results: results,
+      gameState: gameState,
+      showNextButton: this.gameService.canMoveToNextQuestion(),
+      questionNumber: gameState.currentQuestion + 1,
+      totalQuestions: gameState.totalQuestions
+    });
+    
+    // También emitir estado actualizado
+    this.broadcastGameState();
+    
+    this.logger.log('✅ Resultados enviados correctamente al frontend');
+  }
+
   private processNextQuestion() {
+    // Limpiar estado de jugadores listos
+    this.gameService.resetPlayersReadyStatus();
+    
     if (this.gameService.canMoveToNextQuestion()) {
       this.gameService.nextQuestion();
-      this.server.emit('currentQuestion', this.gameService.getCurrentQuestion());
+      
+      const newQuestion = this.gameService.getCurrentQuestion();
+      const gameState = this.gameService.getGameState();
+      
+      this.server.emit('newQuestion', {
+        question: newQuestion,
+        questionNumber: gameState.currentQuestion + 1,
+        totalQuestions: gameState.totalQuestions,
+        gameState: gameState
+      });
+      
       this.broadcastGameState();
       this.startQuestionTimer();
+      
+      this.logger.log(`➡️ Avanzando a pregunta ${gameState.currentQuestion + 1}`);
     } else {
       // Juego terminado
       const finalScores = this.gameService.finishGame();
       
       this.server.emit('gameFinished', {
-        scores: finalScores,
+        finalScores: finalScores,
         players: this.gameService.getAllPlayers(),
+        gameState: this.gameService.getGameState()
       });
       
       this.broadcastGameState();
+      this.logger.log('🏁 Juego terminado - enviando puntuaciones finales');
     }
   }
-
-  constructor(private readonly gameService: GameService) {}
 
   handleConnection(client: Socket) {
     this.logger.log(`👤 Cliente conectado: ${client.id}`);
     
     // Enviar estado actual al nuevo cliente
-    client.emit('gameState', this.gameService.getGameState());
+    const gameState = this.gameService.getGameState();
+    client.emit('gameState', gameState);
 
     // Si hay una pregunta activa, enviarla
-    const gameState = this.gameService.getGameState();
     if (gameState.phase === 'playing') {
-      client.emit('currentQuestion', this.gameService.getCurrentQuestion());
+      const currentQuestion = this.gameService.getCurrentQuestion();
+      client.emit('currentQuestion', {
+        question: currentQuestion,
+        questionNumber: gameState.currentQuestion + 1,
+        totalQuestions: gameState.totalQuestions,
+        timeLeft: gameState.timeLeft
+      });
+    }
+    
+    // NUEVO: Si está en fase de resultados, enviar resultados
+    if (gameState.phase === 'results') {
+      const results = this.gameService.getQuestionResults();
+      client.emit('questionResults', {
+        results: results,
+        gameState: gameState,
+        showNextButton: this.gameService.canMoveToNextQuestion(),
+        questionNumber: gameState.currentQuestion + 1,
+        totalQuestions: gameState.totalQuestions
+      });
+      
+      this.logger.log(`📊 Cliente reconectado - enviando resultados de pregunta ${gameState.currentQuestion + 1}`);
     }
   }
 
@@ -116,12 +178,26 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
 
-    // Iniciar juego con configuración personalizada (o vacía)
+    // Iniciar juego con configuración personalizada
     if (this.gameService.startGame(config)) {
-      this.server.emit('gameStarted');
-      this.server.emit('currentQuestion', this.gameService.getCurrentQuestion());
+      const gameState = this.gameService.getGameState();
+      const currentQuestion = this.gameService.getCurrentQuestion();
+      
+      this.server.emit('gameStarted', {
+        gameState: gameState,
+        firstQuestion: currentQuestion
+      });
+      
+      this.server.emit('currentQuestion', {
+        question: currentQuestion,
+        questionNumber: 1,
+        totalQuestions: gameState.totalQuestions
+      });
+      
       this.broadcastGameState();
       this.startQuestionTimer();
+      
+      this.logger.log('🎮 Juego iniciado correctamente');
     }
   }
 
@@ -132,25 +208,41 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
   ) {
     const { answer } = submitAnswerDto;
+    const player = this.gameService.getPlayer(client.id);
     
-    if (this.gameService.submitAnswer(client.id, answer)) {
-      client.emit('answerSubmitted', { answer });
+    if (!player) {
+      client.emit('error', 'No estás registrado en el juego');
+      return;
+    }
+    
+    const success = this.gameService.submitAnswer(client.id, answer);
+    
+    if (success) {
+      client.emit('answerSubmitted', { 
+        answer: answer,
+        success: true 
+      });
       
-      // Verificar si todos respondieron después de enviar la respuesta
+      this.logger.log(`📝 ${player.name} envió respuesta: ${answer}`);
+      
+      // CRÍTICO: Verificar si la fase cambió a results después de enviar respuesta
       const gameState = this.gameService.getGameState();
       if (gameState.phase === 'results') {
-        // Detener timer si todos respondieron
-        this.stopQuestionTimer();
-        
-        // Emitir resultados inmediatamente
-        const results = this.gameService.getQuestionResults();
-        this.server.emit('questionResults', results);
+        this.logger.log('⚡ Todos respondieron - enviando resultados inmediatamente');
+        this.handleQuestionComplete();
+      } else {
+        // Solo actualizar estado si no cambió a results
         this.broadcastGameState();
       }
+    } else {
+      client.emit('answerSubmitted', { 
+        success: false,
+        error: 'No se pudo enviar la respuesta' 
+      });
+      this.logger.warn(`❌ ${player?.name || 'Jugador desconocido'} - error al enviar respuesta`);
     }
   }
 
-  // MÉTODO ACTUALIZADO: nextQuestion ahora maneja automáticamente el estado "ready"
   @SubscribeMessage('nextQuestion')
   handleNextQuestion(@ConnectedSocket() client: Socket) {
     const gameState = this.gameService.getGameState();
@@ -166,35 +258,40 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
 
-    // Marcar al jugador como listo automáticamente
-    if (!this.gameService.markPlayerReadyForNext(client.id)) {
+    // Marcar al jugador como listo
+    const marked = this.gameService.markPlayerReadyForNext(client.id);
+    
+    if (!marked) {
       client.emit('error', 'No se pudo marcar como listo');
       return;
     }
 
-    // Emitir estado actualizado a todos
-    this.server.emit('playerReadyUpdate', {
-      playersReady: this.gameService.getPlayersReadyStatus()
+    this.logger.log(`✅ ${player.name} ${player.isJoel ? '(Joel 👑)' : ''} listo para siguiente pregunta`);
+
+    // Emitir actualización de jugadores listos
+    this.server.emit('playersReadyUpdate', {
+      playersReady: this.gameService.getPlayersReadyStatus(),
+      totalPlayers: this.gameService.getAllPlayers().length,
+      readyCount: this.gameService.getPlayersReadyStatus().length
     });
 
-    this.logger.log(`🔄 ${player.name} marcado como listo. Total listos: ${this.gameService.getPlayersReadyStatus().length}`);
+    // Verificar si todos están listos O si Joel puede forzar
+    const canAdvance = this.gameService.areAllPlayersReadyForNext() || 
+                      (player.isJoel && this.gameService.getGameState().config.allowJoelToSkipResults);
 
-    // Verificar si todos están listos O si es Joel que puede forzar
-    if (this.gameService.areAllPlayersReadyForNext()) {
-      this.logger.log('✅ Todos los jugadores están listos - avanzando automáticamente');
-      // Pequeño delay para dar feedback visual
-      setTimeout(() => {
-        this.processNextQuestion();
-      }, 500);
-    } else if (player.isJoel && this.gameService.getPlayersReadyStatus().includes(client.id)) {
-      // Joel puede forzar si ya está marcado como listo
-      this.logger.log('👑 Joel está forzando siguiente pregunta');
+    if (canAdvance) {
+      this.logger.log(
+        this.gameService.areAllPlayersReadyForNext() 
+          ? '✅ Todos listos - avanzando automáticamente' 
+          : '👑 Joel forzando siguiente pregunta'
+      );
+      
+      // Pequeño delay para feedback visual
       setTimeout(() => {
         this.processNextQuestion();
       }, 500);
     } else {
-      // Solo marcar como listo, esperar otros jugadores
-      this.logger.log(`⏳ ${player.name} marcado como listo, esperando otros jugadores`);
+      this.logger.log(`⏳ Esperando más jugadores (${this.gameService.getPlayersReadyStatus().length}/${this.gameService.getAllPlayers().length})`);
     }
   }
 
@@ -219,31 +316,65 @@ export class GameGateway implements OnGatewayConnection, OnGatewayDisconnect {
     this.logger.log(`🔄 ${player.name} reinició el juego`);
   }
 
+  // NUEVO: Método para debug y recuperación de estado
+  @SubscribeMessage('requestGameState')
+  handleRequestGameState(@ConnectedSocket() client: Socket) {
+    const gameState = this.gameService.getGameState();
+    const player = this.gameService.getPlayer(client.id);
+    
+    this.logger.log(`📱 ${player?.name || 'Cliente'} solicita estado del juego - Fase: ${gameState.phase}`);
+    
+    // Enviar estado actual
+    client.emit('gameState', gameState);
+    
+    // Si está en results, enviar también los resultados
+    if (gameState.phase === 'results') {
+      const results = this.gameService.getQuestionResults();
+      client.emit('questionResults', {
+        results: results,
+        gameState: gameState,
+        showNextButton: this.gameService.canMoveToNextQuestion(),
+        questionNumber: gameState.currentQuestion + 1,
+        totalQuestions: gameState.totalQuestions
+      });
+      
+      this.logger.log(`📊 Enviando resultados de recuperación para pregunta ${gameState.currentQuestion + 1}`);
+    }
+    
+    // Si está jugando, enviar pregunta actual
+    if (gameState.phase === 'playing') {
+      const currentQuestion = this.gameService.getCurrentQuestion();
+      client.emit('currentQuestion', {
+        question: currentQuestion,
+        questionNumber: gameState.currentQuestion + 1,
+        totalQuestions: gameState.totalQuestions,
+        timeLeft: gameState.timeLeft
+      });
+    }
+  }
+
   private broadcastGameState() {
-    this.server.emit('gameState', this.gameService.getGameState());
+    const gameState = this.gameService.getGameState();
+    this.server.emit('gameState', gameState);
+    
+    // Debug log
+    this.logger.log(`📡 Estado emitido - Fase: ${gameState.phase}, Pregunta: ${gameState.currentQuestion + 1}/${gameState.totalQuestions}`);
   }
 
   private startQuestionTimer() {
     this.stopQuestionTimer(); // Limpiar timer anterior
     
+    this.logger.log(`⏰ Iniciando timer para pregunta ${this.gameService.getGameState().currentQuestion + 1}`);
+    
     this.questionTimer = this.gameService.startQuestionTimer(
-      // onTimeUp
+      // onTimeUp - cuando se acaba el tiempo
       () => {
-        const results = this.gameService.getQuestionResults();
-        this.server.emit('questionResults', results);
-        this.broadcastGameState();
-        this.questionTimer = null;
+        this.logger.log('⏰ Tiempo agotado - enviando resultados');
+        this.handleQuestionComplete();
       },
-      // onTick
+      // onTick - cada segundo
       (timeLeft: number) => {
-        this.server.emit('timerUpdate', timeLeft);
-      },
-      // onAllAnswered
-      () => {
-        const results = this.gameService.getQuestionResults();
-        this.server.emit('questionResults', results);
-        this.broadcastGameState();
-        this.questionTimer = null;
+        this.server.emit('timerUpdate', { timeLeft });
       }
     );
   }
